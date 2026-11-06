@@ -9,16 +9,26 @@ concurrency:
   cancel-in-progress: true
 
 env:
-    PICO_SDK_COMMIT_HASH: a1438dff1d38bd9c65dbd693f0e5db4b9ae91779
+    # Pico SDK 2.3.0 (released 2026-07-03). It bundles BTstack v1.8.2.
+    PICO_SDK_TAG: "2.3.0"
+    PICO_SDK_COMMIT_HASH: 98a542c1a62fb549ffb5d66a3e5892b06276b670
     TINYUSB_TAG: "0.20.0"
 
 jobs:
     build_firmware:
         strategy:
+          fail-fast: false
           matrix:
             board: ["pico_w", "pico2_w"]
-        name: Build Pico-ASHA for ${{ matrix.board }}
+            # "sdk" = BTstack bundled with the Pico SDK (v1.8.2 for SDK 2.3.0).
+            # "v1.8.3" = latest BTstack release, supplied out-of-tree through
+            # PICO_BTSTACK_PATH. The SDK lists BTstack source files explicitly,
+            # so this variant may fail to configure/compile; it is allowed to
+            # fail without failing the whole workflow.
+            btstack: ["sdk", "v1.8.3"]
+        name: Build Pico-ASHA for ${{ matrix.board }} (BTstack ${{ matrix.btstack }})
         runs-on: ubuntu-24.04
+        continue-on-error: ${{ matrix.btstack != 'sdk' }}
         steps:
             - name: Checkout repository
               uses: actions/checkout@v6
@@ -34,30 +44,53 @@ jobs:
                 ref: "${{ env.PICO_SDK_COMMIT_HASH }}"
                 fetch-depth: "0"
 
+            - name: Checkout BTstack ${{ matrix.btstack }}
+              if: matrix.btstack != 'sdk'
+              uses: actions/checkout@v6
+              with:
+                repository: bluekitchen/btstack
+                path: btstack
+                ref: "${{ matrix.btstack }}"
+                fetch-depth: "1"
+
             - name: Install dependencies
               run: |
                 sudo apt-get update && sudo apt-get -y install cmake gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib
             
+            - name: Report component versions
+              run: |
+                echo "Pico SDK: $(git -C pico-sdk describe --tags --always)"
+                if [ "${{ matrix.btstack }}" = "sdk" ]; then
+                  echo "BTstack (bundled with SDK): $(git -C pico-sdk/lib/btstack describe --tags --always || true)"
+                else
+                  echo "BTstack (out-of-tree): $(git -C btstack describe --tags --always || true)"
+                fi
+
             - name: Configure build
               run: |
-                mkdir -p pico-asha/build/${{ matrix.board }}
-                cd pico-asha/build/${{ matrix.board }}
+                BTSTACK_ARGS=""
+                if [ "${{ matrix.btstack }}" != "sdk" ]; then
+                  BTSTACK_ARGS="-DPICO_BTSTACK_PATH=${{github.workspace}}/btstack"
+                fi
+                mkdir -p pico-asha/build/${{ matrix.board }}-btstack-${{ matrix.btstack }}
+                cd pico-asha/build/${{ matrix.board }}-btstack-${{ matrix.btstack }}
                 cmake \
                   -DPICO_SDK_PATH=${{github.workspace}}/pico-sdk \
                   -DCMAKE_BUILD_TYPE=MinSizeRel \
                   -DPICO_BOARD=${{ matrix.board }} \
+                  $BTSTACK_ARGS \
                   ../..
 
             - name: Compile
               run: |
-                cd pico-asha/build/${{ matrix.board }}
+                cd pico-asha/build/${{ matrix.board }}-btstack-${{ matrix.btstack }}
                 cmake --build .
 
             - name: Upload UF2 and ELF binaries
               uses: actions/upload-artifact@v4
               with:
-                name: pico-asha-firmware-${{ matrix.board }}
-                path: pico-asha/build/${{ matrix.board }}/pico_asha.[ue][fl][2f]
+                name: pico-asha-firmware-${{ matrix.board }}-btstack-${{ matrix.btstack }}
+                path: pico-asha/build/${{ matrix.board }}-btstack-${{ matrix.btstack }}/pico_asha.[ue][fl][2f]
 
     build_gui_windows:
         name: Build GUI for Windows
